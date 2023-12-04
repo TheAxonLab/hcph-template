@@ -10,4 +10,4 @@
 #SBATCH --time=0-02:00:00                                         # Time limit hrs:min:sec
 #SBATCH --output=/data/hagmann_group/yaleman/Alex/derivatives/out/%x-%j-%A_%a.out      # Standard output log
 #SBATCH --error=/data/hagmann_group/yaleman/Alex/derivatives/err/%x-%j-%A_%a.err      # Standard error log
-sh N4-Correction-fortemplate.sh /data/hagmann_group/yaleman/Alex/multivar-v00 /data/hagmann_group/yaleman/Alex/multivar-v00/allImages.txt
+sh N4-Correction-fortemplate.sh /path/to/data /path/to/data/allImages.txt
