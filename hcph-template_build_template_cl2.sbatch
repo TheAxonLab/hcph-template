@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash -l
 
 #SBATCH --partition cluster2
 #SBATCH --job-name=antsMultivarTemplate          # Job name
