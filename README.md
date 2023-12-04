@@ -35,6 +35,12 @@ sh create_input_dir.sh
 
 **IMPORTANT:** Check that the `templateInput.csv` file matches the T1w and T2w images in the output directory.
 
+Create a `allImages.txt` file with all anatomical files to be processed:
+
+```shell
+ls /path/to/data/*.nii.gz >> allImages.txt
+```
+
 In your *SLURM* environment, run the denoising process:
 ``` shell
 sbatch N4-Correction_Pipeline_cl2.sbatch
