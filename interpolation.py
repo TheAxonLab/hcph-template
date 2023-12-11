@@ -40,8 +40,70 @@ import os
 from itertools import product
 from typing import Union, Optional
 
+from scipy.io import loadmat
+
+from nilearn.datasets import load_mni152_template
+from nitransforms.base import ImageGrid
+from nitransforms import LinearTransformsMapping
+
 # from nitransforms.nitransforms.linear import LinearTransformsMapping
 # from nitransforms.nitransforms.base import ImageGrid
+
+
+def generate_MNI_grid(resolution: float = 0.8) -> ImageGrid:
+    """_summary_
+
+    Parameters
+    ----------
+    resolution : float, optional
+        _description_, by default 0.8
+
+    Returns
+    -------
+    ImageGrid
+        _description_
+    """
+    mni_template = load_mni152_template(resolution)
+    mni_grid = ImageGrid(mni_template)
+    return mni_grid
+
+
+def mat2affine(
+    files: Union[str, list, np.ndarray], return_transform: bool = False
+) -> Union[list, np.ndarray]:
+    """_summary_
+
+    Parameters
+    ----------
+    files : Union[str, list, np.ndarray]
+        _description_
+    return_transform : bool, optional
+        _description_, by default False
+
+    Returns
+    -------
+    Union[list, np.ndarray]
+        _description_
+    """
+    AFFINE_LAST_ROW = [0, 0, 0, 1]
+    ROTZOOM_SHAPE = (3, 3)
+
+    if type(files) in [list, np.ndarray]:
+        affines = [mat2affine(file) for file in files]
+        if return_transform:
+            return LinearTransformsMapping(affines)
+        return affines
+
+    mat_dict = loadmat(files)
+
+    first_key = list(mat_dict.keys())[0]
+    rot_zooms = mat_dict[first_key][:-3].reshape(ROTZOOM_SHAPE)
+    translation = mat_dict[first_key][-3:]
+
+    affine = np.vstack([np.hstack([rot_zooms, translation]), AFFINE_LAST_ROW])
+    if return_transform:
+        return LinearTransformsMapping([affine])
+    return affine
 
 
 def map_coordinates(
