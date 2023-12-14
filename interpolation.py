@@ -20,37 +20,82 @@
 #
 #     https://www.nipreps.org/community/licensing/
 #
-""" Python script to denoise and aggregate timeseries and, using the latter, compute
-functional connectivity matrices from BIDS derivatives (e.g. fmriprep).
+""" Python script to compute interpolation of 3D images onto a high-definition grid
+based on the accuracy of images alignments (i.e. the distance between the projected
+voxel center of the grid and the voxel center of the image).
 
 Run as (see 'python compute_fc.py -h' for options):
 
-    python compute_fc.py path_to_BIDS_derivatives
+    python interpolation.py path_to_data
 
-In the context of HCPh (pilot), it would be:
-
-    python compute_fc.py /data/datasets/hcph-pilot/derivatives/fmriprep-23.1.4/
 """
 
 import numpy as np
-import pandas as pd
 import nibabel as nib
 import os
+import os.path as op
 
-from itertools import product
+import logging
+
+from joblib import Parallel, delayed
+
 from typing import Union, Optional
 
+from tqdm.notebook import tqdm
+
 from scipy.io import loadmat
+from scipy.interpolate import BSpline, _bsplines
+from scipy.ndimage import map_coordinates
 
 from nilearn.datasets import load_mni152_template
 from nitransforms.base import ImageGrid
-from nitransforms import LinearTransformsMapping
+from nitransforms import LinearTransformsMapping, Affine
+from nitransforms.io.itk import ITKLinearTransform
+
+from config import get_arguments, logger_config
 
 # from nitransforms.nitransforms.linear import LinearTransformsMapping
 # from nitransforms.nitransforms.base import ImageGrid
 
 
-def generate_MNI_grid(resolution: float = 0.8) -> ImageGrid:
+def get_anat_filenames(
+    path_to_data: str,
+    modality_filter: list = ["T1w"],
+    pattern: str = "",
+    template_prefix: str = "A_tpl",
+) -> list:
+    file_list = os.listdir(path_to_data)
+
+    for fltrs in modality_filter + [pattern]:
+        file_list = [file for file in file_list if fltrs in file]
+
+    # Removing template files (e.g. with prefix "A_tpl")
+    anat_files_list = [
+        op.join(path_to_data, file) for file in file_list if template_prefix not in file
+    ]
+
+    return sorted(anat_files_list)
+
+
+def get_transform_files(
+    path_to_data: str,
+    transform_dir: str,
+    transform_name: str = "Affine",
+    template_prefix: str = "template",
+) -> list[str]:
+    path_to_transforms = op.join(path_to_data, transform_dir)
+
+    transforms_files = [
+        op.join(path_to_transforms, file)
+        for file in os.listdir(path_to_transforms)
+        if "Affine" in file and "template" not in file
+    ]
+    return sorted(transforms_files)
+
+
+def generate_MNI_grid(
+    resolution: float = 0.8, save_path: Optional[str] = None
+) -> ImageGrid:
     """_summary_
 
     Parameters
@@ -64,249 +109,328 @@ def generate_MNI_grid(resolution: float = 0.8) -> ImageGrid:
         _description_
     """
     mni_template = load_mni152_template(resolution)
+
+    if save_path is not None:
+        print("Saving MNI Template")
+        mni_filename = f"mni_template-res{resolution}mm.nii.gz"
+        saveloc = op.join(save_path, mni_filename)
+
+        if not op.isfile(saveloc):
+            mni_template.to_filename(saveloc)
+
     mni_grid = ImageGrid(mni_template)
     return mni_grid
 
 
-def mat2affine(
-    files: Union[str, list, np.ndarray], return_transform: bool = False
-) -> Union[list, np.ndarray]:
+def mat2affine(files: Union[str, list, np.ndarray]) -> Union[list, np.ndarray]:
     """_summary_
 
     Parameters
     ----------
     files : Union[str, list, np.ndarray]
         _description_
-    return_transform : bool, optional
-        _description_, by default False
 
     Returns
     -------
     Union[list, np.ndarray]
         _description_
     """
-    AFFINE_LAST_ROW = [0, 0, 0, 1]
-    ROTZOOM_SHAPE = (3, 3)
-
-    if type(files) in [list, np.ndarray]:
+    if isinstance(files, (list, np.ndarray)):
         affines = [mat2affine(file) for file in files]
-        if return_transform:
-            return LinearTransformsMapping(affines)
         return affines
 
-    mat_dict = loadmat(files)
-
-    first_key = list(mat_dict.keys())[0]
-    rot_zooms = mat_dict[first_key][:-3].reshape(ROTZOOM_SHAPE)
-    translation = mat_dict[first_key][-3:]
-
-    affine = np.vstack([np.hstack([rot_zooms, translation]), AFFINE_LAST_ROW])
-    if return_transform:
-        return LinearTransformsMapping([affine])
-    return affine
+    affine = ITKLinearTransform.from_filename(files)
+    return affine.to_ras()
 
 
-def map_coordinates(
-    coords: Union[list, np.ndarray],
-    anat_img: Union[list, nib.Nifti1Image],
-    grid_img: nib.Nifti1Image,
-) -> Union[list, np.ndarray]:
-    """Map the input coordinates from the space given by `anat_img` onto the space
-    given by `grid_img`.
-
-    Parameters
-    ----------
-    coords : Union[list, np.ndarray]
-        _description_
-    anat_img : Union[list, nib.Nifti1Image]
-        _description_
-    grid_img : nib.Nifti1Image
-        _description_
-
-    Returns
-    -------
-    list
-        _description_
-    """
-
-    grid_vox2anat_vox = np.linalg.inv(anat_img.affine).dot(grid_img.affine)
-    coords_target = nib.affines.apply_affine(grid_vox2anat_vox, coords)
-
-    return coords_target
-
-
-def get_anat_filenames(
-    path_to_data: list[str], modality_filter: list = ["T1w"], pattern: str = ""
+def get_transforms(
+    transform_file_list: Union[str, np.ndarray],
+    anat_file_list: Union[str, np.ndarray],
 ) -> list:
-    file_list = os.listdir(path_to_data)
+    affine_list = mat2affine(transform_file_list)
 
-    for fltrs in modality_filter + [pattern]:
-        file_list = [file for file in file_list if fltrs in file]
+    transform_list = LinearTransformsMapping(affine_list)
 
-    # Removing template files (e.g. with prefix "A_tpl")
-    template_prefix = "A_tpl"
-    anat_files_list = [file for file in file_list if template_prefix not in file]
+    transforms_w_ref = []
+    for trans, t_file, anat in zip(transform_list, transform_file_list, anat_file_list):
+        # Safety check that anat files and transform files are corresponding
+        if isinstance(anat, str) and op.basename(anat).split(".")[0] not in op.basename(
+            t_file
+        ):
+            print(
+                f"WARNING: {op.basename(anat).split('.')[0]} "
+                f"not in {op.basename(t_file)}"
+            )
+        trans.reference = anat
+        transforms_w_ref.append(trans)
 
-    return sorted(anat_files_list)
+    return transforms_w_ref
 
 
-def get_boundary_in_target(
-    img: nib.Nifti1Image,
-    target: nib.Nifti1Image,
-    origin: Union[list, np.ndarray] = [0, 0, 0],
-    v: bool = False,
+def ref_id_to_target_id(
+    indices: Union[list, np.ndarray],
+    ref: Union[ImageGrid, nib.Nifti1Image],
+    transform: LinearTransformsMapping,
+    target: Union[ImageGrid, nib.Nifti1Image],
+    **kwargs,
 ) -> np.ndarray:
-    img_boundaries = np.array([origin, img.shape])
-    img_boundaries[-1] -= 1
-
-    img_extremes = list(
-        product(img_boundaries[:, 0], img_boundaries[:, 1], img_boundaries[:, 2])
-    )
-
-    extremes_inTarget = np.array(map_coordinates(img_extremes, target, img))
-    if v:
-        print(f"Computed extremes are: \n{extremes_inTarget}")
-    extremes_inTarget[extremes_inTarget < 0] = 0
-    extremes_inTarget = np.ceil(extremes_inTarget) + 1
-    for i in range(3):
-        extremes_inTarget[:, i] = extremes_inTarget[:, i].clip(0, target.shape[i])
-
-    boundaries_inTarget = np.vstack(
-        [extremes_inTarget.min(axis=0), extremes_inTarget.max(axis=0)]
-    )
-
-    return boundaries_inTarget
+    coords_in_ref = ref.ras(indices)
+    mapped_coords = transform.map(coords_in_ref, **kwargs)
+    ras2vox = ~Affine(target.affine)
+    return ras2vox.map(mapped_coords)
 
 
-def consensus_boundary(file_list: list, target: nib.Nifti1Image) -> np.ndarray:
-    all_boundaries = np.zeros((len(file_list), 2, 3))
-    for file_id, file in enumerate(file_list):
-        img = nib.load(file)
+def dist_from_center(coords: Union[list, np.ndarray]) -> Union[list, np.ndarray]:
+    center_coords = np.floor(coords) + 0.5
 
-        all_boundaries[file_id] = get_boundary_in_target(img, target)
-
-    boundary = np.vstack(
-        [all_boundaries.min(axis=(0, 1)), all_boundaries.max(axis=(0, 1))]
-    ).astype(int)
-    print(f"Consensus boundary is: \n {boundary}")
-    return boundary
-
-
-def distance_from_closest_center(
-    coords: Union[list, np.ndarray], return_array_id: bool = True
-) -> Union[float, tuple[float, np.ndarray]]:
-    array_id = np.floor(coords).astype(int)
-
-    # Vector from voxel center to coordinates
-    diff = coords - array_id - 0.5
-
-    if array_id.ndim > 1:
-        dist = np.linalg.norm(diff, axis=1)
+    if center_coords.ndim > 1:
+        dist = np.linalg.norm(coords - center_coords, axis=1)
     else:
-        dist = np.linalg.norm(diff)
-
-    if return_array_id:
-        return dist, array_id
+        dist = np.linalg.norm(coords - center_coords)
 
     return dist
 
 
-def dist_weighted_sampling(
-    img: nib.Nifti1Image,
-    target: nib.Nifti1Image,
-    coords: Union[str, np.ndarray],
-    weight: float = 0.3,
-    # return_dist: bool = False,
-) -> list[np.ndarray, np.ndarray]:
-    # ) -> Union[np.ndarray, list[np.ndarray]]:
-    img_array = img.get_fdata()
-    grid_in_anat = map_coordinates(coords, img, target)
+def get_voxel_center_dist(
+    grid_ids: Union[list, np.ndarray],
+    fixed_img: ImageGrid,
+    transform: LinearTransformsMapping,
+    moving_img: nib.Nifti1Image,
+) -> np.ndarray:
+    grid_center_ids = grid_ids + 0.5
+    center_in_moving_ids = ref_id_to_target_id(
+        grid_center_ids, fixed_img, transform, moving_img  # , inverse=True
+    )
 
-    sampled_array = np.zeros(len(coords))
-    dist_array = np.zeros_like(sampled_array)
-    # sampled_array_weighted = np.zeros_like(sampled_array)
+    distances = dist_from_center(center_in_moving_ids)
 
-    # Checking that all coordinates are within the img array by building a mask
-    in_boundary_mask = np.all(grid_in_anat < np.array(img_array.shape), axis=1)
-
-    distances, array_ids = distance_from_closest_center(grid_in_anat[in_boundary_mask])
-    array_to_index = tuple([array_ids.T[i] for i in range(3)])
-
-    # Largest distance from the center of the pixel is 0.5 in each dimension
-    # sqrt(0.5² + 0.5² + 0.5²)
-    # max_dist = np.sqrt(3 * (0.5**2))
-    # norm_dist = (1 - weight) + weight * (1 - distances / max_dist)
-
-    sampled_array[in_boundary_mask] = img_array[array_to_index]
-    dist_array[in_boundary_mask] = distances
-    # sampled_array_weighted[in_boundary_mask] = img_array[array_to_index] * norm_dist
-
-    # if return_unweighted:
-    #    return sampled_array_weighted, sampled_array
-
-    return sampled_array, dist_array
+    return distances
 
 
-def dist_weighted_interpolation(
-    file_list: list,
-    target: nib.Nifti1Image,
-    slab_size: int = 10,
-    boundary: Optional[np.ndarray] = None,
-    z_coords_range: Optional[list] = None,
-    v: bool = False,
+def get_spline_kernel(order: int, limits: Optional[float] = None) -> _bsplines.BSpline:
+    # MAX_DIST = 0.6
+    # MAX_DIST = np.sqrt(3 * 0.5**2)
+    MAX_DIST = 1
+
+    if limits is None:
+        limits = MAX_DIST
+    knots = np.linspace(-limits, limits, order + 2)
+    return BSpline.basis_element(knots)
+
+
+def normalize_distances(
+    distances: np.ndarray,
+    dist_kernel_order: int = 1,
+    normalize: bool = True,
+    axis: int = 0,
+) -> np.ndarray:
+    spline_kernel = get_spline_kernel(dist_kernel_order)
+
+    norm_dist = spline_kernel(distances)
+
+    if normalize:
+        return norm_dist / norm_dist.sum(axis=axis)
+    return norm_dist
+
+
+def sample_from_indices(
+    indices: Union[list, np.ndarray],
+    fixed_img: ImageGrid,
+    moving_img: nib.Nifti1Image,
+    transform: LinearTransformsMapping,
     **kwargs,
 ) -> np.ndarray:
-    VOXEL_CENTER = 0.5
+    mapped_indices = ref_id_to_target_id(indices, fixed_img, transform, moving_img)
 
-    if boundary is None:
-        boundary = consensus_boundary(file_list, target)
+    interpolated_values = map_coordinates(
+        moving_img.get_fdata(), mapped_indices.T, **kwargs
+    )
+    return interpolated_values
 
-    dim = [np.arange(bound_limits[0], bound_limits[1]) for bound_limits in boundary.T]
 
-    n_slabs = np.ceil(len(dim[2]) / slab_size).astype(int)
-    slab_split = np.array_split(dim[2], n_slabs)
-
-    if v:
-        print(
-            f"Boundary has size {len(dim[0])}x{len(dim[1])}x{len(dim[2])} "
-            f"which is equal to {len(dim[0])*len(dim[1])*len(dim[2])} voxels."
-        )
-        slab_lengths = [len(slab) for slab in slab_split]
-        slab_df = pd.Series(slab_lengths).value_counts()
-        print("Data has been split in:")
-        print(
-            ", ".join(
-                [f"{n_s} slabs of size {s_size}" for s_size, n_s in slab_df.items()]
+def interpolate_from_indices(
+    indices: Union[list, np.ndarray],
+    fixed_img: ImageGrid,
+    transforms: list[LinearTransformsMapping],
+    moving_list: Optional[list[str]] = None,
+    weight: bool = True,
+    interpolate: bool = True,
+    spline_order: int = 1,
+    **kwargs,
+) -> np.ndarray:
+    distances = np.zeros((len(transforms), len(indices)))
+    resampled = np.zeros_like(distances)
+    for transform_id, (transform, moving) in enumerate(zip(transforms, moving_list)):
+        moving_img = nib.load(moving)
+        if weight:
+            distances[transform_id] = get_voxel_center_dist(
+                indices, fixed_img, transform, moving_img
             )
+
+        if interpolate:
+            resampled[transform_id] = sample_from_indices(
+                indices, fixed_img, moving_img, transform, order=spline_order
+            )
+
+    if weight:
+        norm_distances = normalize_distances(distances, **kwargs)
+    if interpolate:
+        if weight:
+            return resampled.__mul__(norm_distances).sum(axis=0)
+
+        return resampled.mean(axis=0)
+
+    return distances
+
+
+def batch_handler(
+    input_array: np.ndarray,
+    n_batches: int = 100,
+    size: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> list:
+    if n_batches is not None and size is not None:
+        print(
+            "WARNING: both `size` and `n_batches` "
+            "have been set - setting `size` to None."
         )
+        size = None
+    if size is not None:
+        n_batches = np.ceil(len(input_array) / size).astype(int)
+    if n_batches is not None:
+        size = np.ceil(len(input_array) / n_batches).astype(int)
+    if limit is None:
+        limit = n_batches
 
-    interp_array = np.zeros(target.shape)
-    interp_unweighted = np.zeros_like(interp_array)
+    batch_indices = np.arange(n_batches)[:limit]
 
-    for z_coords in slab_split[:3]:
-        slab_coords = [
-            (prod[0], prod[1], prod[2]) for prod in product(dim[0], dim[1], z_coords)
-        ]
-        slab_coords = np.array(slab_coords)
-        slab_coords_ids = (slab_coords.T[0], slab_coords.T[1], slab_coords.T[2])
-        slab_mid_coords = np.array(slab_coords) + VOXEL_CENTER
-        if v:
-            print(f"Slice has {len(slab_coords)} voxels.")
+    return [input_array[i * size : (i + 1) * size] for i in batch_indices]
 
-        slab_values = np.zeros(
-            (len(file_list), len(dim[0]), len(dim[1]), len(z_coords))
+
+def distance_weighted_interpolation(
+    fixed_img: ImageGrid,
+    transforms: list[LinearTransformsMapping],
+    moving_list: list[str],
+    n_batches: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    batch_limit: Optional[int] = None,
+    weight: bool = True,
+    normalize: bool = True,
+    interpolate: bool = True,
+    dist_kernel_order: int = 1,
+    spline_order: int = 1,
+    n_jobs: int = 1,
+) -> np.ndarray:
+    # Separate coordinates as n_batches of even size
+    batches = batch_handler(fixed_img.ndindex.T, n_batches, batch_size, batch_limit)
+
+    interpolated_values = Parallel(n_jobs=n_jobs, return_as="generator")(
+        delayed(interpolate_from_indices)(
+            batch_indices,
+            fixed_img,
+            transforms,
+            moving_list,
+            weight=weight,
+            normalize=normalize,
+            interpolate=interpolate,
+            spline_order=spline_order,
+            dist_kernel_order=dist_kernel_order,
         )
-        slab_dist = np.zeros_like(slab_values)
+        for batch_indices in batches
+    )
 
-        print(slab_values.shape)
-        print(slab_coords_ids[0])
+    interpolated_array = np.zeros(fixed_img.shape)
+    for values, indices in tqdm(zip(interpolated_values, batches), total=len(batches)):
+        interpolated_array[tuple(indices.T)] = values
 
-        for file_id, file in enumerate(file_list):
-            img = nib.load(file)
-            (
-                slab_values[file_id][slab_coords_ids],
-                slab_dist[file_id][slab_coords_ids],
-            ) = dist_weighted_sampling(img, target, slab_mid_coords)
+    return interpolated_array
+    # return np.hstack(interpolated_values).reshape(fixed_img.shape)
 
-    interpolated_img = None
-    return interpolated_img
+
+def get_distance_map(
+    fixed_img: ImageGrid,
+    transforms: list[LinearTransformsMapping],
+    moving_list: list[str],
+    n_batches: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    batch_limit: Optional[int] = None,
+    n_jobs: int = 1,
+    **kwargs,
+) -> np.ndarray:
+    # Separate coordinates as n_batches of even size
+    batches = batch_handler(fixed_img.ndindex.T, n_batches, batch_size, batch_limit)
+
+    distance_map = Parallel(n_jobs=n_jobs, return_as="generator")(
+        delayed(interpolate_from_indices)(
+            batch_indices,
+            fixed_img,
+            transforms,
+            moving_list,
+            weight=True,
+            normalize=False,
+            interpolate=False,
+            **kwargs,
+        )
+        for batch_indices in batches
+    )
+
+    distances_array = np.zeros((len(transforms), *fixed_img.shape))
+    for values, indices in tqdm(zip(distance_map, batches), total=len(batches)):
+        distances_array[:, indices.T[0], indices.T[1], indices.T[2]] = values
+
+    return distances_array
+    # return np.hstack(interpolated_values).reshape(fixed_img.shape)
+
+
+def main():
+    ####################
+    # WORK IN PROGRESS #
+    ####################
+
+    args = get_arguments()
+
+    path_to_data = args.data_dir
+    save_dir = args.output
+    transform_dir = args.transform_dir
+
+    resolution = args.resolution
+    weight = args.no_weight
+
+    verbosity_level = args.verbosity
+    logger_config(verbosity_level)
+
+    mni_grid = generate_MNI_grid(resolution)
+
+    anat_files = get_anat_filenames(path_to_data)
+    logging.info(f"{len(anat_files)} anat files found")
+
+    transform_files = get_transform_files(path_to_data, transform_dir)
+    transforms = get_transforms(transform_files, [mni_grid] * len(transform_files))
+
+    logging.info(f"{len(transforms)} transforms found")
+
+    interpolated_map = distance_weighted_interpolation(
+        mni_grid,
+        transforms,
+        moving_list=anat_files,
+        n_batches=12,
+        weight=weight,
+        normalize=True,
+        interpolate=True,
+        batch_limit=None,
+        dist_kernel_order=1,
+        spline_order=1,
+        n_jobs=12,
+    )
+
+    if save_dir is not None:
+        interpolated_image = nib.Nifti1Image(interpolated_map, affine=mni_grid.affine)
+        # Save as float32 to reduce file size
+        interpolated_image.header.set_data_dtype("float32")
+        fname = f"DiWeTemplate_res-{resolution}_T1w.nii.gz"
+
+        interpolated_image.to_filename(op.join(save_dir, fname))
+
+
+if __name__ == "__main__":
+    main()
