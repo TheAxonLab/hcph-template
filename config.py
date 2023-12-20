@@ -28,7 +28,8 @@ def get_arguments() -> argparse.Namespace:
         "-r",
         "--resolution",
         default=1,
-        help="resolution of the MNI template grid",
+        type=float,
+        help="resolution (in mm) of the MNI template grid",
     )
     parser.add_argument(
         "--transform-dir",
@@ -43,16 +44,29 @@ def get_arguments() -> argparse.Namespace:
         help="specify to NOT weight the interpolation using the projected distances",
     )
     parser.add_argument(
+        "--d-order",
+        default=1,
+        type=int,
+        help="order of the BSpline kernel to apply to the projected distances",
+    )
+    parser.add_argument(
+        "--bspline-order",
+        default=3,
+        type=int,
+        help="order of the BSpline interpolation",
+    )
+    parser.add_argument(
         "-b",
         "--n-batches",
         default=100,
+        type=int,
         help="number of coordinates batches to compute in parallel",
     )
-
     parser.add_argument(
         "-j",
         "--n-jobs",
         default=1,
+        type=int,
         help="number of jobs to send using joblib",
     )
 
