@@ -46,12 +46,8 @@ from tqdm import tqdm as tqdm_script
 
 tqdm_func = tqdm_notebook
 
-from scipy.io import loadmat
 from scipy.interpolate import BSpline, _bsplines
 from scipy.ndimage import map_coordinates
-
-from nilearn.image import smooth_img
-from skimage.filters import gaussian
 
 from nilearn.datasets import load_mni152_template
 from nitransforms.base import ImageGrid
@@ -70,7 +66,29 @@ def get_anat_filenames(
     pattern: str = "",
     template_prefix: str = "A_tpl",
     exclude: list = [],
-) -> list:
+) -> list[str]:
+    """Get the anatomical files including `pattern` and `modality_filter` but not
+    including `template_prefix` and any str in `exclude`.
+
+    Parameters
+    ----------
+    path_to_data : str
+        path to the data directory
+    modality_filter : list, optional
+        modality to include, by default ["T1w"]
+    pattern : str, optional
+        pattern to match in the filename, by default ""
+    template_prefix : str, optional
+        pattern related to already computed templates to exclude in the filename, by
+        default "A_tpl"
+    exclude : list, optional
+        pattern(s) to exclude in the filename, by default []
+
+    Returns
+    -------
+    list[str]
+        list of filenames (without directory !)
+    """
     file_list = os.listdir(path_to_data)
 
     for fltrs in modality_filter + [pattern]:
@@ -89,14 +107,32 @@ def get_transform_files(
     path_to_data: str,
     transform_dir: str,
     transform_name: str = "Affine",
-    template_prefix: str = "template",
+    template_pattern: str = "template",
 ) -> list[str]:
+    """Get the transform files not including `template_pattern`.
+
+    Parameters
+    ----------
+    path_to_data : str
+        path to the data directory
+    transform_dir : str
+        name of the directory with transforms
+    transform_name : str, optional
+        name of the transform, by default "Affine"
+    template_prefix : str, optional
+        template pattern to exclude in the file search, by default "template"
+
+    Returns
+    -------
+    list[str]
+        list of transform files
+    """
     path_to_transforms = op.join(path_to_data, transform_dir)
 
     transforms_files = [
         op.join(path_to_transforms, file)
         for file in os.listdir(path_to_transforms)
-        if "Affine" in file and "template" not in file
+        if transform_name in file and template_pattern not in file
     ]
     return sorted(transforms_files)
 
@@ -104,17 +140,17 @@ def get_transform_files(
 def generate_MNI_grid(
     resolution: float = 0.8, save_path: Optional[str] = None
 ) -> ImageGrid:
-    """_summary_
+    """Create a 3D grid in MNI coordinates with a specific `resolution`.
 
     Parameters
     ----------
     resolution : float, optional
-        _description_, by default 0.8
+        grid resolution (in mm), by default 0.8
 
     Returns
     -------
     ImageGrid
-        _description_
+        empty reference grid
     """
     mni_template = load_mni152_template(resolution)
 
@@ -131,17 +167,17 @@ def generate_MNI_grid(
 
 
 def mat2affine(files: Union[str, list, np.ndarray]) -> Union[list, np.ndarray]:
-    """_summary_
+    """Load `.mat` transforms files and returns the corresponding affine matrix.
 
     Parameters
     ----------
     files : Union[str, list, np.ndarray]
-        _description_
+        path (or list of paths) to the transform files
 
     Returns
     -------
     Union[list, np.ndarray]
-        _description_
+        affine matrix (or list of affine matrices)
     """
     if isinstance(files, (list, np.ndarray)):
         affines = [mat2affine(file) for file in files]
@@ -155,6 +191,20 @@ def get_transforms(
     transform_file_list: Union[str, np.ndarray],
     anat_file_list: Union[str, np.ndarray],
 ) -> list:
+    """Load the affine matrix of the transforms and assign the corresponding reference
+
+    Parameters
+    ----------
+    transform_file_list : Union[str, np.ndarray]
+        list of paths to the transform files
+    anat_file_list : Union[str, np.ndarray]
+        list of paths to the anatomical files
+
+    Returns
+    -------
+    list
+        list of LinearTransformsMapping with corresponding references
+    """
     affine_list = mat2affine(transform_file_list)
 
     transform_list = LinearTransformsMapping(affine_list)
@@ -182,6 +232,24 @@ def ref_id_to_target_id(
     transform: LinearTransformsMapping,
     **kwargs,
 ) -> np.ndarray:
+    """Map the indices of the `ref` array onto the indices of the `target` array using the `transform`
+
+    Parameters
+    ----------
+    indices : Union[list, np.ndarray]
+        array indices to map
+    ref : Union[ImageGrid, nib.Nifti1Image]
+        reference image
+    target : Union[ImageGrid, nib.Nifti1Image]
+        target image to map coordinates to
+    transform : LinearTransformsMapping
+        transform to map the `ref` coordinates onto the `target`
+
+    Returns
+    -------
+    np.ndarray
+        mapped indices
+    """
     coords_in_ref = ref.ras(indices)
     mapped_coords = transform.map(coords_in_ref, **kwargs)
     ras2vox = ~Affine(target.affine)
@@ -190,6 +258,26 @@ def ref_id_to_target_id(
 
 
 def dist_from_center(coords: Union[list, np.ndarray]) -> Union[list, np.ndarray]:
+    """Compute the distances between the coordinates in `coords` and the center of the
+    nearest voxel.
+
+    Since `coords` are supposed to be the indices of the reference voxel
+    centers projected into the target space and converted back to indices (in the
+    target array), the closest voxel will have indices `np.floor(coords)`. For example,
+    coordinates projected at indices (10.5, 15.2, 8.7) will be inside the voxel indexed
+    at (10, 15, 8) with center (10.5, 15.5, 8.5). In this case, the distance is the
+    norm of (0, 0.3, 0.2).
+
+    Parameters
+    ----------
+    coords : Union[list, np.ndarray]
+        input coordinates
+
+    Returns
+    -------
+    Union[list, np.ndarray]
+        computed distances
+    """
     center_coords = np.floor(coords) + 0.5
 
     if center_coords.ndim > 1:
@@ -206,6 +294,26 @@ def get_voxel_center_dist(
     moving_img: nib.Nifti1Image,
     transform: LinearTransformsMapping,
 ) -> np.ndarray:
+    """Get the distance between the center of the voxels indexed by `grid_ids`
+    projected as indices in `moving_img` and the center of the nearest voxel in
+    `moving_img`.
+
+    Parameters
+    ----------
+    grid_ids : Union[list, np.ndarray]
+        indices of the reference voxels
+    fixed_img : ImageGrid
+        reference image grid
+    moving_img : nib.Nifti1Image
+        target image
+    transform : LinearTransformsMapping
+        transform from the reference to the target
+
+    Returns
+    -------
+    np.ndarray
+        array of computed distances
+    """
     grid_center_ids = grid_ids + 0.5
     center_in_moving_ids = ref_id_to_target_id(
         grid_center_ids, fixed_img, moving_img, transform
@@ -217,6 +325,22 @@ def get_voxel_center_dist(
 
 
 def get_spline_kernel(order: int, limits: Optional[float] = None) -> _bsplines.BSpline:
+    """Compute a BSpline basis function of order `order` in the range
+    (-`limits`, `limits`).
+
+    Parameters
+    ----------
+    order : int
+        order of the BSpline basis
+    limits : Optional[float], optional
+        range of definition of the BSpline function such that
+        BSpline(limits) = BSpline(-limits) = 0, by default None
+
+    Returns
+    -------
+    _bsplines.BSpline
+        BSpline kernel function
+    """
     # MAX_DIST = 0.6
     MAX_DIST = np.sqrt(3 * 0.5**2)
     # MAX_DIST = 1
@@ -234,6 +358,26 @@ def normalize_distances(
     axis: int = 0,
     **kwargs,
 ) -> np.ndarray:
+    """Apply a BSpline basis kernel to the distances and normalizes them such that the
+    sum of distances for one singel voxel is one.
+
+    Parameters
+    ----------
+    distances : np.ndarray
+        array of distances
+    dist_kernel_order : int, optional
+        order of the BSpline basis kernel, by default 1
+    normalize : bool, optional
+        condition to normalize the distances, by default True
+    axis : int, optional
+        axis to normalize (should be the axis of the number of distances for each voxel)
+        , by default 0
+
+    Returns
+    -------
+    np.ndarray
+        normalized distances
+    """
     spline_kernel = get_spline_kernel(dist_kernel_order, **kwargs)
 
     norm_dist = spline_kernel(distances)
@@ -253,11 +397,30 @@ def sample_from_indices(
     transform: LinearTransformsMapping,
     **kwargs,
 ) -> np.ndarray:
+    """Sample values in the target (`moving_img`) for the `indices` of the reference
+    (`fixed_img`) projected using the transform (`transform`).
+
+    Parameters
+    ----------
+    indices : Union[list, np.ndarray]
+        indices of the reference to sample on the target
+    fixed_img : ImageGrid
+        reference image
+    moving_img : nib.Nifti1Image
+        target image
+    transform : LinearTransformsMapping
+        transform between the reference coordinates to the target coordinates
+
+    Returns
+    -------
+    np.ndarray
+        array of sampled values
+    """
     mapped_indices = ref_id_to_target_id(indices, fixed_img, moving_img, transform)
 
     # fwhm = 1.2
     # sigma = fwhm / np.sqrt(8 * np.log(2))
-    ## nilearn_smoothed = smooth_img(moving_img, fwhm=fwhm)
+    # nilearn_smoothed = smooth_img(moving_img, fwhm=fwhm)
     # gauss_smoothed = gaussian(moving_img.get_fdata(), sigma=sigma, mode="constant")
 
     # interpolated_values = map_coordinates(gauss_smoothed, mapped_indices.T, **kwargs)
@@ -275,8 +438,35 @@ def get_sample_val_and_dist(
     transforms: list[LinearTransformsMapping],
     weight: bool = True,
     interpolate: bool = True,
-    spline_order: int = 1,
+    spline_order: int = 3,
 ) -> Union[tuple[np.ndarray], np.ndarray]:
+    """Sample the values and the distances to the closest voxel in all of the target
+    images in `moving_list` for the input `indices` of the reference image
+    (`fixed_img`).
+
+    Parameters
+    ----------
+    indices : Union[list, np.ndarray]
+        indices in the reference image
+    fixed_img : ImageGrid
+        reference image
+    moving_list : list[str]
+        list of target images
+    transforms : list[LinearTransformsMapping]
+        list of transforms from the reference to the targets
+    weight : bool, optional
+        condition to compute and normalize the distances, by default True
+    interpolate : bool, optional
+        condition to sample the values using BSpline interpolation, by default True
+    spline_order : int, optional
+        order of the BSpline interpolation, by default 3
+
+    Returns
+    -------
+    Union[tuple[np.ndarray], np.ndarray]
+        either a tuple of the resampled values with the corresponding distances or only
+        a vector with the distances
+    """
     # Resampled average will be correct if `weight` is False
     distances = np.full((len(transforms), len(indices)), 1 / len(transforms))
     resampled = np.zeros_like(distances)
@@ -305,9 +495,34 @@ def interpolate_from_indices(
     transforms: list[LinearTransformsMapping],
     weight: bool = True,
     interpolate: bool = True,
-    spline_order: int = 1,
+    spline_order: int = 3,
     **kwargs,
 ) -> np.ndarray:
+    """Compute the distance weighted interpolation for the list of indices in input.
+
+    Parameters
+    ----------
+    indices : Union[list, np.ndarray]
+        indices to interpolate
+    fixed_img : ImageGrid
+        reference image
+    moving_list : list[str]
+        list of moving images
+    transforms : list[LinearTransformsMapping]
+        list of transforms from the reference to the targets
+    weight : bool, optional
+        condition to compute and normalize the distances, by default True
+    interpolate : bool, optional
+        condition to sample the values using BSpline interpolation, by default True
+    spline_order : int, optional
+        order of the BSpline interpolation, by default 3
+
+    Returns
+    -------
+    np.ndarray
+        resampled array weighted by the distance to the voxel center closest to the
+        projected indices
+    """
     resampled, distances = get_sample_val_and_dist(
         indices, fixed_img, moving_list, transforms, weight, interpolate, spline_order
     )
@@ -321,6 +536,26 @@ def batch_handler(
     size: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> list:
+    """Separate the coordinates of `input_array` as batches (`n_batches` batches of
+    size `size`) of coordinates (to parallelize computation and reduce memory usage)
+
+    Parameters
+    ----------
+    input_array : np.ndarray
+        array to compute coordinates from
+    n_batches : int, optional
+        number of batches, by default 100
+    size : Optional[int], optional
+        size of the batches - setting both `n_batches` and `size` will raise a warning,
+        by default None
+    limit : Optional[int], optional
+        limit the number of batches to compute (for debug), by default None
+
+    Returns
+    -------
+    list
+        list of batches
+    """
     if n_batches is not None and size is not None:
         print(
             "WARNING: both `size` and `n_batches` "
@@ -353,6 +588,42 @@ def distance_weighted_interpolation(
     spline_order: int = 1,
     n_jobs: int = 1,
 ) -> np.ndarray:
+    """Compute the distance weighted interpolation of the target images in `moving_list`
+    onto the reference image (`fixed_img`).
+
+    Parameters
+    ----------
+    fixed_img : ImageGrid
+        reference image
+    moving_list : list[str]
+        list of moving images
+    transforms : list[LinearTransformsMapping]
+        list of transforms from the reference to the targets
+    n_batches : Optional[int], optional
+        number of batches to send in parallel, by default None
+    batch_size : Optional[int], optional
+        size of the batches to send in parallel - setting both `n_batches` and `size`
+        will raise a warning, by default None
+    batch_limit : Optional[int], optional
+        limit the number of batches to compute (for debug), by default None
+    weight : bool, optional
+        condition to compute the distances, by default True
+    normalize : bool, optional
+        condition to normalize the distances, by default True
+    interpolate : bool, optional
+        condition to sample the values using BSpline interpolation, by default True
+    dist_kernel_order : int, optional
+        order of the BSpline basis kernel to apply to the distances, by default 1
+    spline_order : int, optional
+        order of the BSpline interpolation, by default 3
+    n_jobs : int, optional
+        number of `Joblib` jobs to send in parallel, by default 1
+
+    Returns
+    -------
+    np.ndarray
+        interpolated image as an array
+    """
     # Separate coordinates as n_batches of even size
     batches = batch_handler(fixed_img.ndindex.T, n_batches, batch_size, batch_limit)
 
@@ -391,6 +662,31 @@ def get_distance_map(
     n_jobs: int = 1,
     **kwargs,
 ) -> np.ndarray:
+    """Only computes the distance maps.
+
+    Parameters
+    ----------
+    fixed_img : ImageGrid
+        reference image
+    moving_list : list[str]
+        list of moving images
+    transforms : list[LinearTransformsMapping]
+        list of transforms from the reference to the targets
+    n_batches : Optional[int], optional
+        number of batches to send in parallel, by default None
+    batch_size : Optional[int], optional
+        size of the batches to send in parallel - setting both `n_batches` and `size`
+        will raise a warning, by default None
+    batch_limit : Optional[int], optional
+        limit the number of batches to compute (for debug), by default None
+    n_jobs : int, optional
+        number of `Joblib` jobs to send in parallel, by default 1
+
+    Returns
+    -------
+    np.ndarray
+        array of distance maps
+    """
     # Separate coordinates as n_batches of even size
     batches = batch_handler(fixed_img.ndindex.T, n_batches, batch_size, batch_limit)
 
@@ -423,7 +719,33 @@ def get_individual_map(
     batch_limit: Optional[int] = None,
     n_jobs: int = 1,
     **kwargs,
-) -> np.ndarray:
+) -> tuple[np.ndarray]:
+    """Compute and return the resampled and distance map without applying the distance
+    weighted interpolation.
+
+    Parameters
+    ----------
+    fixed_img : ImageGrid
+        reference image
+    moving_list : list[str]
+        list of moving images
+    transforms : list[LinearTransformsMapping]
+        list of transforms from the reference to the targets
+    n_batches : Optional[int], optional
+        number of batches to send in parallel, by default None
+    batch_size : Optional[int], optional
+        size of the batches to send in parallel - setting both `n_batches` and `size`
+        will raise a warning, by default None
+    batch_limit : Optional[int], optional
+        limit the number of batches to compute (for debug), by default None
+    n_jobs : int, optional
+        number of `Joblib` jobs to send in parallel, by default 1
+
+    Returns
+    -------
+    tuple[np.ndarray]
+        array of the distance maps and array of the resampled images
+    """
     # Separate coordinates as n_batches of even size
     batches = batch_handler(fixed_img.ndindex.T, n_batches, batch_size, batch_limit)
 
@@ -509,6 +831,7 @@ def main():
         # fname = f"DiWeTemplate_res-{resolution}_T1w.nii.gz"
         fname = f"distance_weighted_template_res-{resolution}_desc-{suffix}T1w.nii.gz"
 
+        os.makedirs(save_dir, exist_ok=True)
         interpolated_image.to_filename(op.join(save_dir, fname))
 
 
