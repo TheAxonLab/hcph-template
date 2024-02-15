@@ -24,7 +24,7 @@
 based on the accuracy of images alignments (i.e. the distance between the projected
 voxel center of the grid and the voxel center of the image).
 
-Run as (see 'python compute_fc.py -h' for options):
+Run as (see 'python interpolation.py -h' for options):
 
     python interpolation.py path_to_data
 
@@ -108,6 +108,7 @@ def get_transform_files(
     transform_dir: str,
     transform_name: str = "Affine",
     template_pattern: str = "template",
+    exclude: list = [],
 ) -> list[str]:
     """Get the transform files not including `template_pattern`.
 
@@ -121,6 +122,8 @@ def get_transform_files(
         name of the transform, by default "Affine"
     template_prefix : str, optional
         template pattern to exclude in the file search, by default "template"
+    exclude : list, optional
+        pattern(s) to exclude in the filename, by default []
 
     Returns
     -------
@@ -134,6 +137,11 @@ def get_transform_files(
         for file in os.listdir(path_to_transforms)
         if transform_name in file and template_pattern not in file
     ]
+
+    # Removing files to be excluded
+    for excl in exclude:
+        transforms_files = [file for file in transforms_files if excl not in file]
+
     return sorted(transforms_files)
 
 
@@ -146,6 +154,8 @@ def generate_MNI_grid(
     ----------
     resolution : float, optional
         grid resolution (in mm), by default 0.8
+    save_path : Optional[str], optional
+        path to save the grid, by default None
 
     Returns
     -------
@@ -164,6 +174,40 @@ def generate_MNI_grid(
 
     mni_grid = ImageGrid(mni_template)
     return mni_grid
+
+
+def generate_grid_from_img(
+    image: Union[str, ImageGrid, nib.Nifti1Image], resolution: float = 0.8
+) -> ImageGrid:
+    """Create a 3D grid with a specific `resolution` in the space of the specified
+    `image`.
+
+    Parameters
+    ----------
+    image : Union[str, ImageGrid, nib.Nifti1Image]
+        input image to create the grid on
+    resolution : float, optional
+        grid resolution (in mm), by default 0.8
+
+    Returns
+    -------
+    ImageGrid
+        empty reference grid
+    """
+
+    if isinstance(image, str):
+        image = nib.load(image)
+
+    orig_res = image.header.get_zooms()[-1]
+    scale_factor = orig_res / resolution
+    new_shape = [int(scale_factor * s) for s in image.shape]
+
+    empty_array = np.zeros((new_shape), dtype=np.uint8)
+    new_affine = nib.affines.rescale_affine(
+        image.affine, image.shape, zooms=resolution, new_shape=empty_array.shape
+    )
+    empty_grid = ImageGrid(nib.Nifti1Image(empty_array, new_affine))
+    return empty_grid
 
 
 def mat2affine(files: Union[str, list, np.ndarray]) -> Union[list, np.ndarray]:
@@ -232,7 +276,8 @@ def ref_id_to_target_id(
     transform: LinearTransformsMapping,
     **kwargs,
 ) -> np.ndarray:
-    """Map the indices of the `ref` array onto the indices of the `target` array using the `transform`
+    """Map the indices of the `ref` array onto the indices of the `target` array using
+    the `transform`
 
     Parameters
     ----------
@@ -348,7 +393,7 @@ def get_spline_kernel(order: int, limits: Optional[float] = None) -> _bsplines.B
     if limits is None:
         limits = MAX_DIST
     knots = np.linspace(-limits, limits, order + 2)
-    return BSpline.basis_element(knots)
+    return BSpline.basis_element(knots, extrapolate=False)
 
 
 def normalize_distances(
@@ -356,6 +401,7 @@ def normalize_distances(
     dist_kernel_order: int = 1,
     normalize: bool = True,
     axis: int = 0,
+    offset: float = 0,
     **kwargs,
 ) -> np.ndarray:
     """Apply a BSpline basis kernel to the distances and normalizes them such that the
@@ -381,9 +427,10 @@ def normalize_distances(
     spline_kernel = get_spline_kernel(dist_kernel_order, **kwargs)
 
     norm_dist = spline_kernel(distances)
-
-    if np.any(norm_dist < 0):
-        logging.warn("Negative values after BSpline kernel!")
+    # norm_dist = np.clip(spline_kernel(distances) + offset, a_max=1, a_min=0)
+    #
+    # if np.any(norm_dist < 0):
+    #    logging.warn("Negative values after BSpline kernel!")
 
     if normalize:
         return norm_dist / norm_dist.sum(axis=axis)
@@ -717,6 +764,8 @@ def get_individual_map(
     n_batches: Optional[int] = None,
     batch_size: Optional[int] = None,
     batch_limit: Optional[int] = None,
+    map_dtype: type = int,
+    return_normalized: bool = False,
     n_jobs: int = 1,
     **kwargs,
 ) -> tuple[np.ndarray]:
@@ -738,6 +787,10 @@ def get_individual_map(
         will raise a warning, by default None
     batch_limit : Optional[int], optional
         limit the number of batches to compute (for debug), by default None
+    map_dtype : type
+        type of the interpolated map, default int
+    return_normalized : bool
+        condition to return the normalized maps, default False
     n_jobs : int, optional
         number of `Joblib` jobs to send in parallel, by default 1
 
@@ -763,12 +816,38 @@ def get_individual_map(
     )
 
     distances_array = np.zeros((len(transforms), *fixed_img.shape))
-    images_array = np.zeros_like(distances_array)
+    images_array = np.zeros_like(distances_array, dtype=map_dtype)
     for values, indices in tqdm_func(zip(val_and_dist, batches), total=len(batches)):
         images_array[:, indices.T[0], indices.T[1], indices.T[2]] = values[0]
         distances_array[:, indices.T[0], indices.T[1], indices.T[2]] = values[1]
 
+    if return_normalized:
+        logging.info(f"Distance array has a shape of {distances_array.shape}")
+        norm_dmaps = normalize_distances(distances_array)
+        return distances_array, norm_dmaps, images_array
+
     return distances_array, images_array
+
+
+def save_array_as_image(
+    array: np.ndarray,
+    affine: np.ndarray,
+    save_dir: str,
+    fname_pattern: str,
+    fname_fills: dict,
+    img_dtype: type = np.int16,
+) -> None:
+
+    interpolated_image = nib.Nifti1Image(array.astype(img_dtype), affine=affine)
+
+    # Save as int16 to reduce file size
+    dtype_str = str(img_dtype).split("'")[1].split(".")[-1]
+    interpolated_image.header.set_data_dtype(dtype_str)
+
+    fname = fname_pattern.format(**fname_fills)
+
+    os.makedirs(save_dir, exist_ok=True)
+    interpolated_image.to_filename(op.join(save_dir, fname))
 
 
 def main():
@@ -781,6 +860,7 @@ def main():
     path_to_data = args.data_dir
     save_dir = args.output
     transform_dir = args.transform_dir
+    exclude_ses = args.exclude_ses
 
     resolution = args.resolution
     weight = args.no_weight
@@ -788,51 +868,103 @@ def main():
     spline_order = args.bspline_order
     n_batches = args.n_batches
     n_jobs = args.n_jobs
+    use_mni = args.use_mni
+    get_map = args.maps
+    n_subset = args.n_subset
 
     verbosity_level = args.verbosity
     logger_config(verbosity_level)
 
-    logging.info(f"Generating MNI grid at resolution {resolution} mm")
-    mni_grid = generate_MNI_grid(resolution)
-
-    anat_files = get_anat_filenames(path_to_data)
+    anat_files = get_anat_filenames(
+        path_to_data, modality_filter=["T1w"], pattern=".nii.gz", exclude=exclude_ses
+    )
+    anat_files = anat_files[:n_subset]
     logging.info(f"{len(anat_files)} anat files found")
 
-    transform_files = get_transform_files(path_to_data, transform_dir)
+    if use_mni:
+        logging.info(f"Generating MNI grid at resolution {resolution} mm")
+        # mni_grid = generate_MNI_grid(resolution)
+    else:
+        logging.info(f"Generating custom grid at resolution {resolution} mm")
+        mni_grid = generate_grid_from_img(anat_files[0], resolution)
+
+    transform_files = get_transform_files(
+        path_to_data, transform_dir, exclude=exclude_ses
+    )
     transforms = get_transforms(transform_files, [mni_grid] * len(transform_files))
+    transforms = transforms[:n_subset]
 
     logging.info(f"{len(transforms)} transforms found")
 
-    interpolated_map = distance_weighted_interpolation(
-        mni_grid,
-        anat_files,
-        transforms,
-        n_batches=n_batches,
-        weight=weight,
-        normalize=True,
-        interpolate=True,
-        batch_limit=None,
-        dist_kernel_order=dist_kernel_order,
-        spline_order=spline_order,
-        n_jobs=n_jobs,
-    )
+    if get_map:
+        logging.info("Computing individual maps ...")
+        out_maps = get_individual_map(
+            mni_grid,
+            anat_files,
+            transforms,
+            n_batches=n_batches,
+            batch_limit=None,
+            spline_order=spline_order,
+            return_normalized=True,
+            n_jobs=n_jobs,
+        )
+    else:
+        logging.info("Running distance weighted interpolation ...")
+        out_maps = distance_weighted_interpolation(
+            mni_grid,
+            anat_files,
+            transforms,
+            n_batches=n_batches,
+            weight=weight,
+            normalize=True,
+            interpolate=True,
+            batch_limit=None,
+            dist_kernel_order=dist_kernel_order,
+            spline_order=spline_order,
+            n_jobs=n_jobs,
+        )
 
     if save_dir is not None:
-        interpolated_image = nib.Nifti1Image(
-            interpolated_map.astype(np.int16), affine=mni_grid.affine
-        )
-        # Save as int16 to reduce file size
-        interpolated_image.header.set_data_dtype("int16")
-
-        suffix = f"N{len(anat_files)}"
-        suffix += weight * f"DisWei{dist_kernel_order}"
-        suffix += "AllInRes_"
-
-        # fname = f"DiWeTemplate_res-{resolution}_T1w.nii.gz"
-        fname = f"distance_weighted_template_res-{resolution}_desc-{suffix}T1w.nii.gz"
-
-        os.makedirs(save_dir, exist_ok=True)
-        interpolated_image.to_filename(op.join(save_dir, fname))
+        if isinstance(out_maps, tuple):
+            for maps, map_name, map_type in zip(
+                out_maps,
+                ["dmap", "dmapNorm", "interp"],
+                [np.float32, np.float32, np.int16],
+            ):
+                for image, img_name in zip(maps, anat_files):
+                    fname_pattern = (
+                        "sub-{sub}_ses-{ses}_res-{res}_desc-{desc}_{mod}.{ext}"
+                    )
+                    ses = op.basename(img_name).split("_")[1].split("-")[1]
+                    sub = op.basename(img_name).split("_")[0].split("-")[1]
+                    fname_fills = {
+                        "sub": sub,
+                        "ses": ses,
+                        "res": resolution,
+                        "desc": map_name,
+                        "mod": "T1w",
+                        "ext": ".nii.gz",
+                    }
+                    save_array_as_image(
+                        image,
+                        affine=mni_grid.affine,
+                        save_dir=save_dir,
+                        fname_pattern=fname_pattern,
+                        fname_fills=fname_fills,
+                        img_dtype=map_type,
+                    )
+        else:
+            suffix = f"N{len(anat_files)}" + weight * f"DisWei{dist_kernel_order}"
+            fname_pattern = "distance_weighted_template_res-{res}_desc-{desc}T1w.nii.gz"
+            fname_fills = {"res": resolution, "desc": suffix}
+            save_array_as_image(
+                out_maps,
+                affine=mni_grid.affine,
+                save_dir=save_dir,
+                fname_pattern=fname_pattern,
+                fname_fills=fname_fills,
+                img_dtype=np.int16,
+            )
 
 
 if __name__ == "__main__":

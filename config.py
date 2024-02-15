@@ -18,6 +18,13 @@ def get_arguments() -> argparse.Namespace:
         help="specify an output directory",
     )
     parser.add_argument(
+        "--exclude-ses",
+        default=[],
+        action="store",
+        nargs="+",
+        help="a space delimited list of session(s) to exclude",
+    )
+    parser.add_argument(
         "--study-name",
         default="",
         help="name of the study",
@@ -42,6 +49,24 @@ def get_arguments() -> argparse.Namespace:
         default=True,
         action="store_false",
         help="specify to NOT weight the interpolation using the projected distances",
+    )
+    parser.add_argument(
+        "--use-mni",
+        default=False,
+        action="store_true",
+        help="specify to use a high definition grid in 'MNI space'",
+    )
+    parser.add_argument(
+        "--maps",
+        default=False,
+        action="store_true",
+        help="specify to get and save individual maps",
+    )
+    parser.add_argument(
+        "--n-subset",
+        default=-1,
+        type=int,
+        help="number of images to consider (subset of the whole dataset)",
     )
     parser.add_argument(
         "--d-order",
