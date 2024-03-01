@@ -7,8 +7,11 @@
 #########################################################################################################################################
 
 bids_dir=$1 
-out_dir=$bids_dir/../allInRef
-IdFile=$2 
+#out_dir=$bids_dir/../allInRef
+out_dir=$bids_dir/../allInRef-noskull
+mkdir -p $out_dir
+
+IdFile=$2
 
 Ia=$(head -"$SLURM_ARRAY_TASK_ID" $IdFile | tail -1);
 
@@ -49,7 +52,6 @@ if [ "" == "" ]; then
 
         if [ ! -f $imgInRef ]; then
             # mkdir -p $antsN4bfDir
-	    mkdir -p $out_dir
             antsRegistration -d 3 -v -m MI[$target_img, $imFile, 1,32, Regular, 0.1] -t Affine[0.25] \
                 -c [10000x10000x10000, 1e-4, 10] -f 4x2x1 -s 0.6x0.2x0mm --float 1 -o [$transform, $imgInRef]
             

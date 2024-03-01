@@ -81,6 +81,12 @@ def get_arguments() -> argparse.Namespace:
         help="order of the BSpline interpolation",
     )
     parser.add_argument(
+        "--offset",
+        default=0,
+        type=float,
+        help="offset to apply to the projected distances",
+    )
+    parser.add_argument(
         "-b",
         "--n-batches",
         default=100,

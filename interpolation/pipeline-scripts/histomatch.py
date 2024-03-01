@@ -31,6 +31,7 @@ Run as (see 'python histomatch.py -h' for options):
 
 import os
 import os.path as op
+import sys
 import argparse
 import logging
 from typing import Optional, Union
@@ -43,6 +44,9 @@ from joblib import Parallel, delayed
 from tqdm.notebook import tqdm as tqdm_notebook
 from tqdm import tqdm as tqdm_script
 
+print(op.dirname(__file__))
+
+sys.path.append(op.join(op.dirname(__file__), ".."))
 import interpolation as interp
 
 
@@ -77,6 +81,13 @@ def get_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--mask",
+        default=None,
+        type=str,
+        help="a string pattern to identify mask files",
+    )
+
+    parser.add_argument(
         "-n",
         "--n_jobs",
         default=1,
@@ -89,7 +100,10 @@ def get_arguments() -> argparse.Namespace:
 
 
 def histomatch_single_img(
-    image: Union[str, nib.Nifti1Image], img_ref: np.ndarray
+    image: Union[str, nib.Nifti1Image],
+    img_ref: np.ndarray,
+    mask_img: Optional[Union[str, nib.Nifti1Image]] = None,
+    save_type: str = "uint8",
 ) -> nib.Nifti1Image:
     """Normalize intensity of `image` to the one of `img_ref` using histogram matching.
 
@@ -99,6 +113,10 @@ def histomatch_single_img(
         image to normalize
     img_ref : np.ndarray
         reference image
+    mask_img : Union[str, nib.Nifti1Image], optional
+        mask image
+    save_type : str, optional
+        type to save the image, by default "uint8"
 
     Returns
     -------
@@ -107,16 +125,29 @@ def histomatch_single_img(
     """
     if isinstance(image, str):
         image = nib.load(image)
-    matched_data = match_histograms(image.get_fdata(), img_ref)
+    if isinstance(mask_img, str):
+        mask_img = nib.load(mask_img)
 
-    return nib.Nifti1Image(matched_data, affine=image.affine, dtype="uint8")
+    masked_data = image.get_fdata()
+    if mask_img is not None:
+        mask = mask_img.get_fdata()
+        masked_data = masked_data * mask
+
+    matched_data = np.zeros_like(masked_data)
+    matched_data[masked_data > 0] = match_histograms(masked_data, img_ref)[
+        masked_data > 0
+    ]
+
+    return nib.Nifti1Image(matched_data, affine=image.affine, dtype=save_type)
 
 
 def histomatch_list(
     img_ref: np.ndarray,
     img_list: list[str],
+    mask_list: Optional[list[str]] = None,
     pattern: str = "N4corrden",
     saveloc: Optional[str] = None,
+    save_type: str = "uint8",
     n_jobs: int = 1,
 ) -> None:
     """Normalize a list of images to a reference image using histogram matching.
@@ -127,11 +158,15 @@ def histomatch_list(
         reference image
     img_list : list[str]
         list of path to the images
+    mask_list : list[str]
+        list of path to the brain masks
     pattern : str, optional
         pattern to identify the image (used to rename the output), by default
         "N4corrden"
     saveloc : Optional[str], optional
         path to the output directory, by default None
+    save_type : str, optional
+        type to save the image, by default "uint8"
     n_jobs : int, optional
         number of jobs to send to `joblib`, by default 1
     """
@@ -139,7 +174,10 @@ def histomatch_list(
     if n_jobs > 1:
         logging.info(f"Running in parallel with {n_jobs} jobs")
     matched_images = Parallel(n_jobs=n_jobs, return_as="generator")(
-        delayed(histomatch_single_img)(file, img_ref) for file in img_list
+        delayed(histomatch_single_img)(
+            file, img_ref, mask_img=mask, save_type=save_type
+        )
+        for file, mask in zip(img_list, mask_list)
     )
 
     for matched_img, file in tqdm_func(
@@ -158,6 +196,7 @@ def main():
 
     modalities = args.modality
     pattern = args.pattern
+    mask_pattern = args.mask
 
     n_jobs = args.n_jobs
 
@@ -185,8 +224,26 @@ def main():
         first_img = nib.load(files_list[0])
         first_data = first_img.get_fdata()
 
+        mask_list = [None] * len(files_list)
+        if mask_pattern is not None:
+            mask_list = interp.get_anat_filenames(
+                path_to_imgs,
+                pattern=mask_pattern,
+                modality_filter=[modality],
+                exclude=["in0048", "rerun"],
+            )
+
+            mask = nib.load(mask_list[0])
+            first_data = first_data * mask.get_fdata()
+
         histomatch_list(
-            first_data, files_list, pattern=pattern, saveloc=saveloc, n_jobs=n_jobs
+            first_data,
+            files_list,
+            mask_list=mask_list,
+            pattern=pattern,
+            saveloc=saveloc,
+            save_type="uint8",
+            n_jobs=n_jobs,
         )
 
 
