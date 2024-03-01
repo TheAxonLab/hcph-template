@@ -28,7 +28,7 @@ The processing pipeline uses several scripts. Here's a summary of the steps in e
     - Normalizes the intensity of the images by matching the histogram of each image to the one of a reference (usually the first image).
 - `align_with_t1w.sh`
     - Align images of all modalities (different than T1w) with the corresponding T1w.
-- ``
+- `antsMultivariateTemplateConstruction2-mod.sh`
     - Creates the initial template by computing the (affine) transforms between each individual image (moving images) and a reference (fixed, usually the first image).
 - `interpolation.py`
     - Creates the final template in the specified resolution by weighting the interpolation by the accuracy of the alignement between voxel centers of the fixed image projected onto the space of the moving image and the center of the closest voxel in the moving space.
@@ -89,7 +89,7 @@ The processing pipeline uses several scripts. Here's a summary of the steps in e
 
 7. Finally, build the template:
     ``` shell
-    sbatch hcph-template_build_template_sl2.sbatch
+    sbatch hcph-template_build_template_mni_sl2.sbatch
     ```
 
 8. Inspect the quality of the template by looking at the `A_tpl_template0.nii.gz` and `A_tpl_template1.nii.gz`.
