@@ -387,8 +387,8 @@ def get_spline_kernel(order: int, limits: Optional[float] = None) -> _bsplines.B
         BSpline kernel function
     """
     # MAX_DIST = 0.6
-    MAX_DIST = np.sqrt(3 * 0.5**2)
-    # MAX_DIST = 1
+    # MAX_DIST = np.sqrt(3 * 0.5**2)
+    MAX_DIST = 1
 
     if limits is None:
         limits = MAX_DIST
@@ -427,10 +427,10 @@ def normalize_distances(
     spline_kernel = get_spline_kernel(dist_kernel_order, **kwargs)
 
     norm_dist = spline_kernel(distances)
-    # norm_dist = np.clip(spline_kernel(distances) + offset, a_max=1, a_min=0)
-    #
-    # if np.any(norm_dist < 0):
-    #    logging.warn("Negative values after BSpline kernel!")
+    norm_dist = np.clip(spline_kernel(distances) + offset, a_max=1, a_min=0)
+
+    if np.any(norm_dist < 0):
+        logging.warn("Negative values after BSpline kernel!")
 
     if normalize:
         return norm_dist / norm_dist.sum(axis=axis)
@@ -765,7 +765,7 @@ def get_individual_map(
     batch_size: Optional[int] = None,
     batch_limit: Optional[int] = None,
     map_dtype: type = int,
-    return_normalized: bool = False,
+    return_normalized: int = 0,
     n_jobs: int = 1,
     **kwargs,
 ) -> tuple[np.ndarray]:
@@ -789,8 +789,9 @@ def get_individual_map(
         limit the number of batches to compute (for debug), by default None
     map_dtype : type
         type of the interpolated map, default int
-    return_normalized : bool
-        condition to return the normalized maps, default False
+    return_normalized : int
+        order of the BSpline for the distance normalization (0 means no normalization),
+        default 0
     n_jobs : int, optional
         number of `Joblib` jobs to send in parallel, by default 1
 
@@ -819,12 +820,10 @@ def get_individual_map(
     images_array = np.zeros_like(distances_array, dtype=map_dtype)
     for values, indices in tqdm_func(zip(val_and_dist, batches), total=len(batches)):
         images_array[:, indices.T[0], indices.T[1], indices.T[2]] = values[0]
-        distances_array[:, indices.T[0], indices.T[1], indices.T[2]] = values[1]
-
-    if return_normalized:
-        logging.info(f"Distance array has a shape of {distances_array.shape}")
-        norm_dmaps = normalize_distances(distances_array)
-        return distances_array, norm_dmaps, images_array
+        if return_normalized:
+            distances_array[:, indices.T[0], indices.T[1], indices.T[2]] = (
+                normalize_distances(values[1], dist_kernel_order=return_normalized)
+            )
 
     return distances_array, images_array
 
@@ -926,10 +925,15 @@ def main():
 
     if save_dir is not None:
         if isinstance(out_maps, tuple):
+            # for maps, map_name, map_type in zip(
+            #    out_maps,
+            #    ["dmap", "dmapNorm", "interp"],
+            #    [np.float32, np.float32, np.int16],
+            # ):
             for maps, map_name, map_type in zip(
                 out_maps,
-                ["dmap", "dmapNorm", "interp"],
-                [np.float32, np.float32, np.int16],
+                ["dmapNorm", "interp"],
+                [np.float32, np.int16],
             ):
                 for image, img_name in zip(maps, anat_files):
                     fname_pattern = (
@@ -943,7 +947,7 @@ def main():
                         "res": resolution,
                         "desc": map_name,
                         "mod": "T1w",
-                        "ext": ".nii.gz",
+                        "ext": "nii.gz",
                     }
                     save_array_as_image(
                         image,
