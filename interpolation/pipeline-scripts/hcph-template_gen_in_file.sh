@@ -31,6 +31,8 @@ do
     elif [ "$modality" == "T2w" ]
     then
         printf "$fname" >> "${save_loc}/templateInput-HPC.csv"
+    else
+        echo "Modality not recognized for ${fname} !"
     fi
     prefix_char="\n"
 done

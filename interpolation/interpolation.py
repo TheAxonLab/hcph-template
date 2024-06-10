@@ -632,6 +632,7 @@ def distance_weighted_interpolation(
     normalize: bool = True,
     interpolate: bool = True,
     dist_kernel_order: int = 1,
+    offset: float = 0,
     spline_order: int = 1,
     n_jobs: int = 1,
 ) -> np.ndarray:
@@ -685,6 +686,7 @@ def distance_weighted_interpolation(
             interpolate=interpolate,
             spline_order=spline_order,
             dist_kernel_order=dist_kernel_order,
+            offset=offset,
         )
         for batch_indices in batches
     )
@@ -864,6 +866,7 @@ def main():
     resolution = args.resolution
     weight = args.no_weight
     dist_kernel_order = args.d_order
+    offset = args.offset
     spline_order = args.bspline_order
     n_batches = args.n_batches
     n_jobs = args.n_jobs
@@ -919,17 +922,13 @@ def main():
             interpolate=True,
             batch_limit=None,
             dist_kernel_order=dist_kernel_order,
+            offset=offset,
             spline_order=spline_order,
             n_jobs=n_jobs,
         )
 
     if save_dir is not None:
         if isinstance(out_maps, tuple):
-            # for maps, map_name, map_type in zip(
-            #    out_maps,
-            #    ["dmap", "dmapNorm", "interp"],
-            #    [np.float32, np.float32, np.int16],
-            # ):
             for maps, map_name, map_type in zip(
                 out_maps,
                 ["dmapNorm", "interp"],
@@ -958,7 +957,11 @@ def main():
                         img_dtype=map_type,
                     )
         else:
-            suffix = f"N{len(anat_files)}" + weight * f"DisWei{dist_kernel_order}"
+            suffix = (
+                f"N{len(anat_files)}"
+                + weight * f"DisWei{dist_kernel_order}"
+                + (offset != 0) * f"Off{offset}"
+            )
             fname_pattern = "distance_weighted_template_res-{res}_desc-{desc}T1w.nii.gz"
             fname_fills = {"res": resolution, "desc": suffix}
             save_array_as_image(
