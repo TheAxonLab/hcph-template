@@ -44,8 +44,6 @@ from typing import Union, Optional
 from tqdm.notebook import tqdm as tqdm_notebook
 from tqdm import tqdm as tqdm_script
 
-tqdm_func = tqdm_notebook
-
 from scipy.interpolate import BSpline, _bsplines
 from scipy.ndimage import map_coordinates
 
@@ -56,7 +54,9 @@ from nitransforms.base import ImageGrid
 from nitransforms.manip import TransformChain
 from nitransforms.io.itk import ITKLinearTransform
 
-from config import get_arguments, logger_config
+from .config import get_arguments, logger_config
+
+tqdm_func = tqdm_notebook
 
 # from nitransforms.nitransforms.linear import LinearTransformsMapping
 # from nitransforms.nitransforms.base import ImageGrid
