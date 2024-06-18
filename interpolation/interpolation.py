@@ -50,8 +50,10 @@ from scipy.interpolate import BSpline, _bsplines
 from scipy.ndimage import map_coordinates
 
 from nilearn.datasets import load_mni152_template
-from nitransforms.base import ImageGrid
 from nitransforms import LinearTransformsMapping, Affine
+from nitransforms.base import ImageGrid
+
+from nitransforms.manip import TransformChain
 from nitransforms.io.itk import ITKLinearTransform
 
 from config import get_arguments, logger_config
@@ -104,7 +106,6 @@ def get_anat_filenames(
 
 
 def get_transform_files(
-    path_to_data: str,
     transform_dir: str,
     transform_name: str = "Affine",
     template_pattern: str = "template",
@@ -114,10 +115,8 @@ def get_transform_files(
 
     Parameters
     ----------
-    path_to_data : str
-        path to the data directory
     transform_dir : str
-        name of the directory with transforms
+        path to the directory with transforms
     transform_name : str, optional
         name of the transform, by default "Affine"
     template_prefix : str, optional
@@ -130,11 +129,11 @@ def get_transform_files(
     list[str]
         list of transform files
     """
-    path_to_transforms = op.join(path_to_data, transform_dir)
+    # path_to_transforms = op.join(path_to_data, transform_dir)
 
     transforms_files = [
-        op.join(path_to_transforms, file)
-        for file in os.listdir(path_to_transforms)
+        op.join(transform_dir, file)
+        for file in os.listdir(transform_dir)
         if transform_name in file and template_pattern not in file
     ]
 
@@ -200,6 +199,10 @@ def generate_grid_from_img(
 
     orig_res = image.header.get_zooms()[-1]
     scale_factor = orig_res / resolution
+
+    if np.allclose(scale_factor, 1):
+        return ImageGrid(image)
+
     new_shape = [int(scale_factor * s) for s in image.shape]
 
     empty_array = np.zeros((new_shape), dtype=np.uint8)
@@ -297,9 +300,9 @@ def ref_id_to_target_id(
     """
     coords_in_ref = ref.ras(indices)
     mapped_coords = transform.map(coords_in_ref, **kwargs)
-    ras2vox = ~Affine(target.affine)
 
-    return ras2vox.map(mapped_coords)
+    ras2vox = Affine(target.affine)
+    return ras2vox.map(mapped_coords, inverse=True)
 
 
 def dist_from_center(coords: Union[list, np.ndarray]) -> Union[list, np.ndarray]:
@@ -387,11 +390,19 @@ def get_spline_kernel(order: int, limits: Optional[float] = None) -> _bsplines.B
         BSpline kernel function
     """
     # MAX_DIST = 0.6
-    # MAX_DIST = np.sqrt(3 * 0.5**2)
-    MAX_DIST = 1
+    MAX_DIST = np.sqrt(3 * 0.5**2)
+    # MAX_DIST = 1
 
     if limits is None:
         limits = MAX_DIST
+
+    if order == 1:
+
+        def linear_kernel(x, zero=MAX_DIST):
+            return -x / zero + 1
+
+        return linear_kernel
+
     knots = np.linspace(-limits, limits, order + 2)
     return BSpline.basis_element(knots, extrapolate=False)
 
@@ -836,10 +847,16 @@ def save_array_as_image(
     save_dir: str,
     fname_pattern: str,
     fname_fills: dict,
+    rescale: int = 255,
     img_dtype: type = np.int16,
 ) -> None:
 
-    interpolated_image = nib.Nifti1Image(array.astype(img_dtype), affine=affine)
+    # Rescale the array between 0 and the rescale value
+    if rescale > 0:
+        array = (array / array.max() * rescale).astype(img_dtype)
+        array[array < 0] = 0
+
+    interpolated_image = nib.Nifti1Image(array, affine=affine)
 
     # Save as int16 to reduce file size
     dtype_str = str(img_dtype).split("'")[1].split(".")[-1]
@@ -859,9 +876,14 @@ def main():
     args = get_arguments()
 
     path_to_data = args.data_dir
+    path_to_template = args.template_dir
     save_dir = args.output
+    image_modality = args.modality
     transform_dir = args.transform_dir
     exclude_ses = args.exclude_ses
+
+    pre_transform_pattern = args.pre_transform
+    post_transform_pattern = args.post_transform
 
     resolution = args.resolution
     weight = args.no_weight
@@ -878,32 +900,91 @@ def main():
     logger_config(verbosity_level)
 
     anat_files = get_anat_filenames(
-        path_to_data, modality_filter=["T1w"], pattern=".nii.gz", exclude=exclude_ses
+        path_to_data,
+        modality_filter=[image_modality],
+        pattern=".nii.gz",
+        exclude=exclude_ses,
     )
     anat_files = anat_files[:n_subset]
     logging.info(f"{len(anat_files)} anat files found")
 
     if use_mni:
         logging.info(f"Generating MNI grid at resolution {resolution} mm")
-        # mni_grid = generate_MNI_grid(resolution)
+        mni_grid = generate_MNI_grid(resolution)
+    elif image_modality != "T1w":
+        logging.info(
+            f"Generating grid from the 1st T1w image at resolution {resolution} mm"
+        )
+        mni_grid = generate_grid_from_img(
+            anat_files[0].replace(image_modality, "T1w"), resolution
+        )
     else:
-        logging.info(f"Generating custom grid at resolution {resolution} mm")
+        logging.info(
+            f"Generating grid from the 1st image at resolution {resolution} mm"
+        )
         mni_grid = generate_grid_from_img(anat_files[0], resolution)
 
     transform_files = get_transform_files(
-        path_to_data, transform_dir, exclude=exclude_ses
+        op.join(path_to_template, transform_dir), exclude=exclude_ses
     )
     transforms = get_transforms(transform_files, [mni_grid] * len(transform_files))
     transforms = transforms[:n_subset]
 
     logging.info(f"{len(transforms)} transforms found")
 
+    pre_transforms = [Affine() for _ in range(len(transforms))]
+    if pre_transform_pattern is not None:
+        pre_transforms_files = get_transform_files(
+            path_to_template,
+            transform_name=pre_transform_pattern,
+            exclude=exclude_ses,
+        )
+        ref_anat_files = get_anat_filenames(
+            path_to_data,
+            modality_filter=["T1w"],
+            pattern=".nii.gz",
+            exclude=exclude_ses,
+        )
+        pre_transforms = get_transforms(
+            pre_transforms_files,
+            [generate_grid_from_img(anat) for anat in ref_anat_files],
+        )
+        pre_transforms = pre_transforms[:n_subset]
+        logging.info(f"{len(pre_transforms)} PRE transforms found")
+    elif image_modality != "T1w":
+        logging.warning(f"`{image_modality}` has been selected without pre-transforms!")
+
+    post_transform = [Affine()]
+    if post_transform_pattern is not None:
+        if use_mni:
+            post_transform_files = get_transform_files(
+                path_to_template,
+                transform_name=post_transform_pattern,
+                template_pattern="^^^^",
+                exclude=exclude_ses,
+            )
+            post_transform = get_transforms(
+                post_transform_files, [mni_grid] * len(post_transform_files)
+            )
+            logging.info(f"{len(post_transform)} POST transforms found")
+        else:
+            logging.warning("Post-transforms should only be used with MNI grid!")
+    else:
+        post_transform_pattern = ""
+
+    post_transform_list = post_transform * len(transforms)
+
+    all_transforms = [
+        TransformChain(transforms=[post, trans, pre])
+        for pre, trans, post in zip(pre_transforms, transforms, post_transform_list)
+    ]
+
     if get_map:
         logging.info("Computing individual maps ...")
         out_maps = get_individual_map(
             mni_grid,
             anat_files,
-            transforms,
+            all_transforms,
             n_batches=n_batches,
             batch_limit=None,
             spline_order=spline_order,
@@ -915,7 +996,7 @@ def main():
         out_maps = distance_weighted_interpolation(
             mni_grid,
             anat_files,
-            transforms,
+            all_transforms,
             n_batches=n_batches,
             weight=weight,
             normalize=True,
@@ -945,7 +1026,7 @@ def main():
                         "ses": ses,
                         "res": resolution,
                         "desc": map_name,
-                        "mod": "T1w",
+                        "mod": image_modality,
                         "ext": "nii.gz",
                     }
                     save_array_as_image(
@@ -957,13 +1038,24 @@ def main():
                         img_dtype=map_type,
                     )
         else:
+            space_name = "native"
+            if use_mni:
+                space_name = post_transform_pattern.split("_")[-1]
             suffix = (
                 f"N{len(anat_files)}"
                 + weight * f"DisWei{dist_kernel_order}"
                 + (offset != 0) * f"Off{offset}"
             )
-            fname_pattern = "distance_weighted_template_res-{res}_desc-{desc}T1w.nii.gz"
-            fname_fills = {"res": resolution, "desc": suffix}
+            fname_pattern = (
+                "distance_weighted_template_res-{res}_space-{space}"
+                + "_desc-{desc}{modality}.nii.gz"
+            )
+            fname_fills = {
+                "res": resolution,
+                "desc": suffix,
+                "modality": image_modality,
+                "space": space_name,
+            }
             save_array_as_image(
                 out_maps,
                 affine=mni_grid.affine,

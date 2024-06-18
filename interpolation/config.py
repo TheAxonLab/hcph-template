@@ -11,6 +11,7 @@ def get_arguments() -> argparse.Namespace:
 
     # Input/Output arguments and options
     parser.add_argument("data_dir", help="path to data directory")
+    parser.add_argument("template_dir", help="path to initial template directory")
     parser.add_argument(
         "-o",
         "--output",
@@ -39,9 +40,27 @@ def get_arguments() -> argparse.Namespace:
         help="resolution (in mm) of the MNI template grid",
     )
     parser.add_argument(
+        "-m",
+        "--modality",
+        default="T1w",
+        help="modality of the images to interpolate",
+    )
+    parser.add_argument(
         "--transform-dir",
         default="ANTs_iteration_0",
         help="name of the transforms to apply (should be a directory in `data_dir`)",
+    )
+    parser.add_argument(
+        "--pre-transform",
+        default=None,
+        help="name of the transforms to apply BEFORE the template grid interpolation "
+        "(should be a directory in `data_dir`)",
+    )
+    parser.add_argument(
+        "--post-transform",
+        default=None,
+        help="name of the transforms to apply AFTER the template grid interpolation "
+        "(should be a directory in `data_dir`)",
     )
     parser.add_argument(
         "-w",
