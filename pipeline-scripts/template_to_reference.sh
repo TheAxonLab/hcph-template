@@ -6,12 +6,12 @@
 ########################################## Main program #################################################################################
 #########################################################################################################################################
 # How to run:
-# sh interpolation/pipeline-scripts/template_to_reference.sh ~/data/hcph-template/multivar-v00/derivatives/diswe-interp/my_template.nii.gz ~/path_to_mni/mni_template.nii.gz MNI152NLin2009cAsym Affine
+# sh interpolation/pipeline-scripts/template_to_reference.sh ~/data/hcph-template/multivar-v00/derivatives/diswe-interp/my_template.nii.gz ~/path_to_mni/mni_template.nii.gz MNI04mm Affine
 # 
 # Will create:
-# my_template_space-MNI152NLin2009cAsymAffine.nii.gz
+# my_template_space-MNI04mmAffine.nii.gz
 # and
-# transform_space-MNI152NLin2009cAsymAffine.mat
+# transform_space-MNI04mmAffine.mat
 
 
 moving_img=$1

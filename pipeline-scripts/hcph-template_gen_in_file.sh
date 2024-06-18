@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash -l
+
+#########################################################################################################################################
+########################################## Main program #################################################################################
+#########################################################################################################################################
+# How to run:
+# sh pipeline-scripts/hcph-template_gen_in_file.sh ~/data/hcph-template/multivar-v00/derivatives/allInRef-noskull-i4
 
 bids_dir=$1
 filename=$2
@@ -6,7 +12,6 @@ filename=$2
 if [ "$filename" == "" ]
 then
     files_list=$( ls $bids_dir/*N4corrdenhist*.nii.gz )
-    #files_list=$( ls $bids_dir/*N4corrdennorm*.nii.gz )
 else
     files_list=$( cat $bids_dir/$filename )
 fi
@@ -36,3 +41,5 @@ do
     fi
     prefix_char="\n"
 done
+
+printf "\n" >> "${save_loc}/${savename}"

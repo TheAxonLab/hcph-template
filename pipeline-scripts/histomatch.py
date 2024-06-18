@@ -41,10 +41,7 @@ import nibabel as nib
 from skimage.exposure import match_histograms
 from joblib import Parallel, delayed
 
-from tqdm.notebook import tqdm as tqdm_notebook
 from tqdm import tqdm as tqdm_script
-
-print(op.dirname(__file__))
 
 sys.path.append(op.join(op.dirname(__file__), ".."))
 import interpolation as interp

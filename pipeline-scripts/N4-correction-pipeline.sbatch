@@ -10,4 +10,4 @@
 #SBATCH --time=0-01:00:00                                         # Time limit hrs:min:sec
 #SBATCH --output=/data/hagmann_group/acionca/logs/out/%x-%j-%A_%a.out      # Standard output log
 #SBATCH --error=/data/hagmann_group/acionca/logs/err/%x-%j-%A_%a.err      # Standard error log
-sh N4-Correction-fortemplate.sh /data/hagmann_group/acionca/multivar-v00 /data/hagmann_group/acionca/multivar-v00/allImages.txt
+sh N4-correction-pipeline.sh /data/hagmann_group/acionca/multivar-v00 /data/hagmann_group/acionca/multivar-v00/allImages.txt
