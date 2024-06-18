@@ -1,10 +1,9 @@
 #!/bin/bash
 
 #path_to_data="/data/hagmann_group/acionca/multivar-v00/derivatives/allInRef"
-path_to_data="/Users/acionca/data/hcph-template/multivar-v00/derivatives/refine01"
+path_to_data="/Users/acionca/data/hcph-template/multivar-v00/derivatives/refineCC"
 cd $path_to_data
 
-first_line=$( head -n 1 templateInput-HPC.csv )
 first_t1="A_tpl_template0.nii.gz"
 first_t2="A_tpl_template1.nii.gz"
 
