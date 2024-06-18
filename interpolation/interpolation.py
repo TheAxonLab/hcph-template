@@ -54,7 +54,7 @@ from nitransforms.base import ImageGrid
 from nitransforms.manip import TransformChain
 from nitransforms.io.itk import ITKLinearTransform
 
-from .config import get_arguments, logger_config
+from utils.config import get_arguments, logger_config
 
 tqdm_func = tqdm_notebook
 

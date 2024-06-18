@@ -43,7 +43,8 @@ from joblib import Parallel, delayed
 
 from tqdm import tqdm as tqdm_script
 
-sys.path.append(op.join(op.dirname(__file__), ".."))
+sys.path.append(op.join(op.dirname(__file__), "../interpolation"))
+
 import interpolation as interp
 
 
